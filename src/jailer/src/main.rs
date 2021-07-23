@@ -32,6 +32,7 @@ pub enum Error {
     CloseNetNsFd(io::Error),
     CloseDevNullFd(io::Error),
     Copy(PathBuf, PathBuf, io::Error),
+    CopyDir(String),
     CreateDir(PathBuf, io::Error),
     CStringParsing(NulError),
     Dup2(io::Error),
@@ -115,6 +116,7 @@ impl fmt::Display for Error {
                 "{}",
                 format!("Failed to copy {:?} to {:?}: {}", file, path, err).replace("\"", "")
             ),
+            CopyDir(ref err) => write!(f, "{}", err),
             CreateDir(ref path, ref err) => write!(
                 f,
                 "{}",
@@ -278,6 +280,9 @@ pub fn build_arg_parser() -> ArgParser<'static> {
             "Cgroup and value to be set by the jailer. It must follow this format: \
              <cgroup_file>=<value> (e.g cpu.shares=10). This argument can be used \
              multiple times to add multiple cgroups.",
+        ))
+        .arg(Argument::new("lib-path").allow_multiple(true).help(
+            "The lib path that need to be copied to the jailed root."
         ))
         .arg(
             Argument::new("version")

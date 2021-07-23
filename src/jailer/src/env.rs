@@ -18,6 +18,7 @@ use std::io::Write;
 use utils::arg_parser::Error::MissingValue;
 use utils::syscall::SyscallReturnCode;
 use utils::{arg_parser, validators};
+use core::result;
 
 const STDIN_FILENO: libc::c_int = 0;
 const STDOUT_FILENO: libc::c_int = 1;
@@ -62,6 +63,7 @@ pub struct Env {
     id: String,
     chroot_dir: PathBuf,
     exec_file_path: PathBuf,
+    lib_paths: Vec<PathBuf>,
     uid: u32,
     gid: u32,
     netns: Option<String>,
@@ -148,6 +150,14 @@ impl Env {
             cgroups.append(&mut numa_cgroups);
         }
 
+        let mut lib_paths = Vec::new();
+        if let Some(lib_path_args) = arguments.multiple_values("lib-path") {
+
+            for p in lib_path_args {
+                lib_paths.push(PathBuf::from(p));
+            }
+        }
+
         // cgroup format: <cgroup_controller>.<cgroup_property>=<value>,...
         if let Some(cgroups_args) = arguments.multiple_values("cgroup") {
             for cg in cgroups_args {
@@ -171,6 +181,7 @@ impl Env {
             id: id.to_owned(),
             chroot_dir,
             exec_file_path,
+            lib_paths,
             uid,
             gid,
             netns,
@@ -321,6 +332,58 @@ impl Env {
         Ok(exec_file_name.to_os_string())
     }
 
+    fn copy_libs_to_chroot(&mut self) -> Result<()> {
+        for p in &self.lib_paths {
+            let mut src = p;
+            let source;
+            if p.read_link().is_ok() {
+                source = p.read_link().unwrap();
+                src = &source;
+            }
+
+            let mut rel_path = p.as_path();
+            if p.is_absolute() {
+                rel_path = p.strip_prefix("/")
+                    .map_err(|e|Error::CopyDir(e.to_string()))?;
+            }
+
+            let dest_path = self.chroot_dir.join(rel_path);
+            if p.is_dir() {
+                Env::copy_dir(src, &dest_path)
+                    .map_err(|e| Error::Copy(src.clone(), dest_path.clone(), e))?;
+            } else {
+                if fs::metadata(&dest_path).is_err() {
+                    if let Some(p) = dest_path.parent() {
+                        // create missing directories
+                        fs::create_dir_all(p)
+                            .map_err(|e| Error::Copy(src.clone(), dest_path.clone(), e))?;
+                    }
+                }
+                fs::copy(src, &dest_path)
+                    .map_err(|e| Error::Copy(src.clone(), dest_path.clone(), e))?;
+            }
+        }
+        Ok(())
+    }
+
+    // Copy all the files (not including directories) from a source directory to a dest directory
+    fn copy_dir<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> result::Result<(), io::Error> {
+        if fs::metadata(to.as_ref()).is_err() {
+            // create missing directories
+            fs::create_dir_all(to.as_ref())?;
+        }
+        for entry in fs::read_dir(from.as_ref())? {
+            let path = entry?.path();
+            if path.is_file() {
+                if let Some(filename) = path.file_name() {
+                    let dest_path = to.as_ref().join(filename);
+                    fs::copy(&path, &dest_path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn join_netns(path: &str) -> Result<()> {
         // Not used `as_raw_fd` as it will create a dangling fd (object will be freed immediately) instead
         // used `into_raw_fd` which provides underlying fd ownership to caller.
@@ -342,10 +405,6 @@ impl Env {
 
     fn exec_command(&self, chroot_exec_file: PathBuf) -> io::Error {
         Command::new(chroot_exec_file)
-            .args(&["--id", &self.id])
-            .args(&["--start-time-us", &self.start_time_us.to_string()])
-            .args(&["--start-time-cpu-us", &self.start_time_cpu_us.to_string()])
-            .args(&["--parent-cpu-time-us", &self.jailer_cpu_time_us.to_string()])
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -444,6 +503,8 @@ impl Env {
 
     pub fn run(mut self) -> Result<()> {
         let exec_file_name = self.copy_exec_to_chroot()?;
+        self.copy_libs_to_chroot()?;
+
         let chroot_exec_file = PathBuf::from("/").join(&exec_file_name);
 
         // Join the specified network namespace, if applicable.
