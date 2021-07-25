@@ -1,8 +1,9 @@
 // Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::ffi::{CStr, OsString};
+use std::ffi::{CStr, OsString, CString};
 use std::fs::{self, canonicalize, File, OpenOptions, Permissions};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::IntoRawFd;
 use std::os::unix::process::CommandExt;
@@ -361,6 +362,10 @@ impl Env {
                 }
                 fs::copy(src, &dest_path)
                     .map_err(|e| Error::Copy(src.clone(), dest_path.clone(), e))?;
+                let path_str = CString::new(dest_path.as_os_str().as_bytes()).unwrap();
+                SyscallReturnCode(unsafe { libc::chown(path_str.as_ptr(), self.uid, self.gid) })
+                    .into_empty_result()
+                    .map_err(|e| Error::ChangeFileOwner(dest_path, e));
             }
         }
         Ok(())
